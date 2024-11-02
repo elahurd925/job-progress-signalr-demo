@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Customer Merge Tool</title>
+</head>
+<body>
+    <h1>Customer Merge Tool</h1>
+    <p id="progress" style="color:lightslategray">Enter the number of customers you want to merge and click Start Merge.</p>
+
+    <label for="customerCount">Number of Customers to Merge:</label>
+    <input type="number" id="customerCount" placeholder="Enter count" min="1">
+    <button id="startMergeButton">Start Merge</button>
+    <button id="clearMergesButton">Clear Merges</button>
+
+    <h2>Merge Progress</h2>
+    <p id="progress-error" style="color:red"></p>
+    <div id="progressContainer">
+    </div>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/microsoft-signalr/6.0.1/signalr.min.js"></script>
+
+    <script>
+        async function setupSignalRConnection(sessionId) {
+            const connection = new signalR.HubConnectionBuilder().withUrl("http://localhost:5034/mergeHub").build();
+            connection.on("ReceiveMergeStart", (mergeJob) => {
+                document.getElementById(`progress-${mergeJob.sessionId}`).textContent = `Progress: ${mergeJob.completedMergeCount} of ${mergeJob.totalMergeCount}`;
+            });
+
+            connection.on("ReceiveMergeUpdate", (mergeJob) => {
+                document.getElementById(`progress-${mergeJob.sessionId}`).textContent = `Progress: ${mergeJob.completedMergeCount} of ${mergeJob.totalMergeCount}`;
+            });
+
+            connection.on("ReceiveMergeComplete", async (mergeJob) => {
+                document.getElementById(`progress-${mergeJob.sessionId}`).textContent = `Merge completed! ${mergeJob.completedMergeCount} of ${mergeJob.totalMergeCount} merged.`;
+                enableMergeButtons();
+                await connection.stop();
+                console.log("SignalR connection closed until next merge.");
+            });
+
+            try {
+                await connection.start();
+                console.log("SignalR Connected");
+
+                await connection.invoke("JoinGroup", sessionId);
+            } catch (err) {
+                console.error(err);
+                setTimeout(() => setupSignalRConnection(sessionId), 5000); // Retry connection on failure
+            }
+        }
+
+        document.getElementById("clearMergesButton").onclick = async function () {
+            const response = await fetch("http://localhost:5034/api/merge/clear-merges", {
+                method: "DELETE",
+            });
+            if (response.ok) {
+                document.getElementById("progress").textContent = "Merges cleared!";
+            }
+        }
+
+        let eventSource;
+
+        // Listen to progress of merge with SSE -- every 1 second, the endpoint will check the DB and send us the updated progress
+        function startListeningToMergeProgress(sessionId) { 
+            eventSource = new EventSource(`http://localhost:5034/api/merge/merge-status?sessionId=${sessionId}`);
+                    
+            eventSource.onmessage = function(event) {
+                const data = JSON.parse(event.data);
+                if (!data.Status) {
+                    document.getElementById("progress").textContent = "Waiting for merge data...";
+                } else if (data.Status == "Done") {
+                    document.getElementById("progress").textContent = `Merge complete!`;
+                    stopListeningToMergeProgress();
+                    enableMergeButtons();
+                } else {
+                    document.getElementById("progress").textContent = `Progress: ${data.CompletedMergeCount} of ${data.TotalMergeCount}`;
+                }
+            };
+
+            eventSource.onerror = function() {
+                document.getElementById("progress").textContent = "Connection lost, retrying...";
+                enableMergeButtons();
+            };
+        }
+
+        // When we are done with the merge, we can stop listening for updates
+        function stopListeningToMergeProgress() {
+            if (eventSource) {
+                eventSource.close();
+                eventSource = null;
+                console.log("Stopped listening to merge progress events.");
+            }
+        }
+
+        function disableMergeButtons() {
+            document.getElementById("startMergeButton").disabled = true;
+            document.getElementById("clearMergesButton").disabled = true;
+        }
+
+        function enableMergeButtons() {
+            document.getElementById("startMergeButton").disabled = false;
+            document.getElementById("clearMergesButton").disabled = false;
+        }
+
+        function createMergeProgressDiv(sessionId) {
+            const progressDiv = document.createElement("div");
+            progressDiv.id = `progress-${sessionId}`;
+            progressDiv.innerHTML = 'Merge job queued...';
+            document.getElementById("progressContainer").appendChild(progressDiv);
+        }
+
+        document.getElementById("startMergeButton").onclick = async function () {
+            //disableMergeButtons();
+            const customerCount = document.getElementById("customerCount").value;
+            if (!customerCount || customerCount <= 0) {
+                alert("Please enter a valid number of customers to merge.");
+                enableMergeButtons();
+                return;
+            }
+
+            try {
+                // Send a POST request to start the merge job
+                const response = await fetch(`http://localhost:5034/api/merge/merge-customers?customerCount=${customerCount}`, {
+                    method: "POST",
+                });
+                
+                if (response.ok) {
+                    var data = await response.json();
+                    var sessionId = data.sessionId;
+                    await setupSignalRConnection(sessionId);
+                    createMergeProgressDiv(sessionId);
+                    // startListeningToMergeProgress(sessionId);
+                } else {
+                    document.getElementById("progress-error").textContent = "Failed to start merge job.";
+                    enableMergeButtons();
+                }
+            } catch (error) {
+                document.getElementById("progress-error").textContent = "Error starting merge job.";
+                enableMergeButtons();
+            }
+        };
+    </script>
+</body>
+</html>
